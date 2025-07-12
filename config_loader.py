@@ -9,7 +9,9 @@ class Config:
                 'font_name': '微软雅黑',
                 'font_size': '24',
                 'stroke_width': '2',
-                'max_tracks': '18'
+                'max_tracks': '18',
+                'danmaku_opacity': '0.85',
+                'line_spacing_ratio': '0.2'
             },
             'Danmaku': {
                 'scroll_speed': '180',
@@ -35,6 +37,8 @@ class Config:
         self.font_size = parser.getint('Display', 'font_size')
         self.stroke_width = parser.getint('Display', 'stroke_width')
         self.max_tracks = parser.getint('Display', 'max_tracks')
+        self.danmaku_opacity = parser.getfloat('Display', 'danmaku_opacity')
+        self.line_spacing_ratio = parser.getfloat('Display', 'line_spacing_ratio')
 
         # Danmaku
         self.scroll_speed = parser.getint('Danmaku', 'scroll_speed')

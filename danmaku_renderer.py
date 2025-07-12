@@ -1,4 +1,4 @@
-# danmaku_renderer.py (v18 - All-in-One On-Top Strategies)
+# danmaku_renderer.py (v20 - Opacity and Adaptive Spacing)
 import sys
 import random
 import time
@@ -13,6 +13,7 @@ try:
     PYWIN32_AVAILABLE = True
 except ImportError:
     PYWIN32_AVAILABLE = False
+    print("警告: pywin32 库未安装，置顶策略2和3将不可用。")
 
 from danmaku_models import ActiveDanmaku
 
@@ -34,28 +35,32 @@ class DanmakuWindow(QMainWindow):
 
         self.setGeometry(self.config.screen_geometry)
 
-        # ... (其他初始化代码保持不变) ...
         self._active_danmaku = []
         self._font = QFont(self.config.font_name, self.config.font_size, QFont.Weight.Bold)
         self._font_metrics = QFontMetrics(self._font)
-        self.track_height = self._font_metrics.height() + 5
+
+        # ==================== 自适应行间距修复 ====================
+        font_height = self._font_metrics.height()
+        line_spacing = int(font_height * self.config.line_spacing_ratio)
+        self.track_height = font_height + line_spacing
         self.y_offset = self._font_metrics.ascent() + 5
+        # ========================================================
+        
         num_tracks = self.config.max_tracks
         self._scroll_tracks = [0] * num_tracks
         self._top_tracks = [0] * num_tracks
         self._bottom_tracks = [0] * num_tracks
+
         self._paint_times = deque(maxlen=60)
+
         self._animation_timer = QTimer(self)
         self._animation_timer.timeout.connect(self.update_states)
         self._animation_timer.start(1000 // 60)
 
-        # ==================== 置顶策略选择器 ====================
         strategy = self.config.on_top_method
         print(f"当前置顶策略: {strategy}")
 
-        if strategy == 0: # 策略0: Qt默认，什么也不做
-            pass
-        else:
+        if strategy != 0:
             if strategy in [2, 3] and not PYWIN32_AVAILABLE:
                 print("警告: Win32 策略需要 'pywin32' 库。请运行 'pip install pywin32'。")
             else:
@@ -66,8 +71,9 @@ class DanmakuWindow(QMainWindow):
                     self._on_top_timer.timeout.connect(self._force_on_top_win32_unconditional)
                 elif strategy == 3:
                     self._on_top_timer.timeout.connect(self._check_and_force_on_top_win32)
-                self._on_top_timer.start(2000)
-        # =======================================================
+                
+                if self._on_top_timer.receivers(self._on_top_timer.timeout) > 0:
+                    self._on_top_timer.start(2000)
     
     def add_danmaku(self, danmaku_data):
         if len(self._active_danmaku) >= self.config.max_on_screen:
@@ -131,6 +137,10 @@ class DanmakuWindow(QMainWindow):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setFont(self._font)
+
+        # ==================== 透明度配置应用 ====================
+        painter.setOpacity(self.config.danmaku_opacity)
+        # ========================================================
         
         for danmaku in self._active_danmaku:
             pen = QPen(QColor("black"), self.config.stroke_width)
@@ -143,14 +153,16 @@ class DanmakuWindow(QMainWindow):
             
             painter.setPen(danmaku.color)
             painter.drawText(p, danmaku.text)
-
+        
+        # 恢复不透明度，确保Debug信息清晰
+        painter.setOpacity(1.0)
+        
         if self.config.debug_enabled:
             self._paint_debug_info(painter)
 
     def _paint_debug_info(self, painter: QPainter):
         painter.setPen(QPen(QColor("red"), 2))
         painter.drawRect(self.rect().adjusted(1, 1, -1, -1))
-
         now = time.monotonic()
         self._paint_times.append(now)
         if len(self._paint_times) > 1:
@@ -158,50 +170,36 @@ class DanmakuWindow(QMainWindow):
             fps = (len(self._paint_times) - 1) / elapsed if elapsed > 0 else 0
         else:
             fps = 0
-
         debug_text = f"FPS: {fps:.1f}\nDanmaku: {len(self._active_danmaku)}"
         painter.setPen(QColor("lime"))
         debug_font = QFont("Consolas", 12)
         painter.setFont(debug_font)
-
         pos_map = {'top_left': Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
                    'top_right': Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
                    'bottom_right': Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight,
                    'bottom_left': Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft}
         alignment = pos_map.get(self.config.debug_info_position, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
-        
         painter.drawText(self.rect().adjusted(10, 10, -10, -10), int(alignment), debug_text)
 
-    # --- 以下是所有置顶策略对应的方法 ---
-
     def _force_on_top_qt(self):
-        """策略1：使用 Qt 的 raise_ 和 activateWindow。"""
-        if self.config.debug_enabled or self.isMinimized():
-            return
+        if self.isMinimized(): return
         self.raise_()
         self.activateWindow()
 
     def _force_on_top_win32_unconditional(self):
-        """策略2：无条件使用 Win32 API 强制置顶。"""
-        if self.config.debug_enabled or not PYWIN32_AVAILABLE:
-            return
+        if not PYWIN32_AVAILABLE: return
         try:
-            hwnd = self.winId()
-            win32gui.SetWindowPos(int(hwnd), win32con.HWND_TOPMOST, 0, 0, 0, 0,
+            win32gui.SetWindowPos(int(self.winId()), win32con.HWND_TOPMOST, 0, 0, 0, 0,
                                   win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
-        except Exception:
-            pass
+        except Exception: pass
 
     def _check_and_force_on_top_win32(self):
-        """策略3：检测到被覆盖后，再使用 Win32 API 恢复置顶。"""
-        if self.config.debug_enabled or not PYWIN32_AVAILABLE:
-            return
+        if not PYWIN32_AVAILABLE: return
         try:
-            hwnd = self.winId()
+            hwnd = int(self.winId())
             style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
             if not (style & win32con.WS_EX_TOPMOST):
                 print("检测到窗口被覆盖，正在尝试恢复置顶...")
-                win32gui.SetWindowPos(int(hwnd), win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
                                       win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
-        except Exception:
-            pass
+        except Exception: pass

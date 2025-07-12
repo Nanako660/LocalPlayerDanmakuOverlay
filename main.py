@@ -77,7 +77,7 @@ class Application:
 
 if __name__ == "__main__":
     config = Config()
-    danmaku_data = load_from_xml('958151789.xml')
+    danmaku_data = load_from_xml('testDanmaku/30034562089.xml')
     
     if not danmaku_data:
         print("弹幕加载失败，程序退出。")
