@@ -8,16 +8,17 @@ from PyQt6.QtCore import QTimer
 from config_loader import Config
 from danmaku_parser import load_from_xml
 from danmaku_renderer import DanmakuWindow
-from media_monitor import MediaMonitor, MediaMonitorError
+from media_monitor import MediaMonitor, MediaMonitorError, get_foreground_window_aumid
+import win32gui
 
 class Application:
-    def __init__(self, config, all_danmaku):
+    def __init__(self, config, all_danmaku, parent=None):
         self.config = config
         self.all_danmaku = all_danmaku
         self.danmaku_start_times = [d.start_time for d in self.all_danmaku]
         
-        self.app = QApplication(sys.argv)
-        self.renderer = DanmakuWindow(self.config)
+        # The QApplication is now managed by the GUI
+        self.renderer = DanmakuWindow(self.config, parent=parent)
         self.monitor = MediaMonitor()
         
         self.danmaku_idx = 0
@@ -26,13 +27,16 @@ class Application:
         self.sync_timer = QTimer()
         self.sync_timer.timeout.connect(self.sync_loop)
 
-    def run(self):
-        # 首次运行时帮助用户发现 AUMID
+    def start(self):
+        # Discover sessions asynchronously without blocking
         asyncio.run(self.discover_sessions())
-
         self.renderer.show()
-        self.sync_timer.start(100) # 每100ms同步一次状态
-        sys.exit(self.app.exec())
+        self.sync_timer.start(100)
+
+    def stop(self):
+        self.sync_timer.stop()
+        self.renderer.close()
+        print("弹幕已停止并关闭窗口。")
 
     async def discover_sessions(self):
         print("--- 正在发现所有活动媒体会话 ---")
@@ -50,12 +54,40 @@ class Application:
         print("-------------------------------------\n")
     
     def sync_loop(self):
+        foreground_aumid = get_foreground_window_aumid()
+        # Check if the target player or the GUI is in the foreground
+        is_player_foreground = foreground_aumid and self.config.target_aumid.lower() in foreground_aumid.lower()
+        is_gui_foreground = False
+        try:
+            # This requires the main GUI window to be the parent of the DanmakuWindow.
+            # A bit of a hack to get the main window's handle.
+            main_gui_window = self.renderer.parent()
+            if main_gui_window:
+                gui_hwnd = main_gui_window.winId()
+                is_gui_foreground = win32gui.GetForegroundWindow() == gui_hwnd
+        except AttributeError:
+            # In case parent() or winId() is not what we expect.
+            pass
+
+        if not is_player_foreground and not is_gui_foreground:
+            self.renderer.hide()
+            return
+        else:
+            self.renderer.show()
+
         try:
             info = asyncio.run(self.monitor.get_current_session_info())
         except Exception:
             info = None
 
-        if not info or info.source_aumid != self.config.target_aumid or info.status != "PLAYING":
+        if not info or info.source_aumid != self.config.target_aumid:
+            self.renderer.pause()
+            return
+
+        if info.status == "PLAYING":
+            self.renderer.resume()
+        else:  # Covers PAUSED, STOPPED, etc.
+            self.renderer.pause()
             return
 
         current_position = info.position.total_seconds()
@@ -76,12 +108,12 @@ class Application:
 
 
 if __name__ == "__main__":
-    config = Config()
-    danmaku_data = load_from_xml('testDanmaku/30034562089.xml')
-    
-    if not danmaku_data:
-        print("弹幕加载失败，程序退出。")
-        sys.exit(1)
-        
-    app_instance = Application(config, danmaku_data)
-    app_instance.run()
+    # This file is no longer the main entry point.
+    # The GUI is now launched from gui.py for development or a new entry script.
+    print("请通过 gui.py 或新的主入口脚本启动程序。")
+    # To run the GUI from here for convenience:
+    from gui import MainWindow
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())

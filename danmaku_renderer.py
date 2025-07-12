@@ -18,8 +18,8 @@ except ImportError:
 from danmaku_models import ActiveDanmaku
 
 class DanmakuWindow(QMainWindow):
-    def __init__(self, config):
-        super().__init__()
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
         self.config = config
         self.config.screen_geometry = QApplication.primaryScreen().geometry()
         
@@ -30,7 +30,7 @@ class DanmakuWindow(QMainWindow):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        if not self.config.debug_enabled:
+        if not self.config.debug:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self.setGeometry(self.config.screen_geometry)
@@ -57,7 +57,12 @@ class DanmakuWindow(QMainWindow):
         self._animation_timer.timeout.connect(self.update_states)
         self._animation_timer.start(1000 // 60)
 
-        strategy = self.config.on_top_method
+        try:
+            strategy = int(self.config.ontop_strategy)
+        except (ValueError, TypeError):
+            strategy = 1 # Default to a safe value if conversion fails
+            print(f"警告: 无效的置顶策略值 '{self.config.ontop_strategy}'。将使用默认值 1。")
+
         print(f"当前置顶策略: {strategy}")
 
         if strategy != 0:
@@ -76,7 +81,7 @@ class DanmakuWindow(QMainWindow):
                     self._on_top_timer.start(2000)
     
     def add_danmaku(self, danmaku_data):
-        if len(self._active_danmaku) >= self.config.max_on_screen:
+        if len(self._active_danmaku) >= self.config.max_danmaku_count:
             return
 
         text_width = self._font_metrics.horizontalAdvance(danmaku_data.text)
@@ -85,14 +90,20 @@ class DanmakuWindow(QMainWindow):
         track_found = False
         if danmaku_data.mode == 1:
             track_list = self._scroll_tracks
-            for _ in range(len(track_list) * 2): 
-                track_idx = random.randrange(len(track_list))
-                if time.monotonic() > track_list[track_idx]:
-                    y_pos = (track_idx * self.track_height) + self.y_offset
-                    track_list[track_idx] = time.monotonic() + (text_width / self.config.scroll_speed) * 0.8
-                    track_found = True
-                    break
-            if not track_found: return
+            
+            # More robust track finding: find all available, then pick one randomly.
+            # This is better than random probing which might fail even if tracks are free.
+            available_tracks = [i for i, t in enumerate(track_list) if time.monotonic() > t]
+            
+            if not available_tracks:
+                return # No track available, so we drop the danmaku.
+            
+            track_idx = random.choice(available_tracks)
+            y_pos = (track_idx * self.track_height) + self.y_offset
+            
+            # Estimate when the track will be free again. 0.8 is a factor to allow some overlap.
+            track_list[track_idx] = time.monotonic() + (text_width / self.config.scroll_speed) * 0.8
+            track_found = True
         elif danmaku_data.mode == 5:
             track_list = self._top_tracks
             for i, track_time in enumerate(track_list):
@@ -115,11 +126,34 @@ class DanmakuWindow(QMainWindow):
         new_active_danmaku = ActiveDanmaku(danmaku_data.text, danmaku_data.color, danmaku_data.mode, y_pos, text_width, self.config)
         self._active_danmaku.append(new_active_danmaku)
 
+    def pause(self):
+        if self._animation_timer.isActive():
+            self._animation_timer.stop()
+            print("Danmaku rendering paused.")
+
+    def resume(self):
+        if not self._animation_timer.isActive():
+            self._animation_timer.start(1000 // 60)
+            print("Danmaku rendering resumed.")
+
     def update_states(self):
         delta_time = 1 / 60
         current_time = time.monotonic()
-        still_active = [d for d in self._active_danmaku if self.is_danmaku_active(d, current_time, delta_time)]
-        self._active_danmaku = still_active
+
+        # In-place update to avoid list allocation.
+        # We move all active danmaku to the beginning of the list
+        # and then truncate it. This is more memory-efficient than
+        # creating a new list in every frame, especially with many danmaku.
+        active_count = 0
+        for i in range(len(self._active_danmaku)):
+            d = self._active_danmaku[i]
+            if self.is_danmaku_active(d, current_time, delta_time):
+                if i != active_count:
+                    self._active_danmaku[active_count] = d
+                active_count += 1
+        
+        del self._active_danmaku[active_count:]
+
         self.update()
 
     def is_danmaku_active(self, danmaku, current_time, delta_time):
@@ -139,7 +173,7 @@ class DanmakuWindow(QMainWindow):
         painter.setFont(self._font)
 
         # ==================== 透明度配置应用 ====================
-        painter.setOpacity(self.config.danmaku_opacity)
+        painter.setOpacity(self.config.opacity)
         # ========================================================
         
         for danmaku in self._active_danmaku:
@@ -157,7 +191,7 @@ class DanmakuWindow(QMainWindow):
         # 恢复不透明度，确保Debug信息清晰
         painter.setOpacity(1.0)
         
-        if self.config.debug_enabled:
+        if self.config.debug:
             self._paint_debug_info(painter)
 
     def _paint_debug_info(self, painter: QPainter):

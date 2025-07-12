@@ -9,6 +9,10 @@
 import asyncio
 from datetime import timedelta
 
+import win32gui
+import win32process
+from psutil import Process
+
 try:
     from winsdk.windows.media.control import (
         GlobalSystemMediaTransportControlsSessionManager as MediaManager,
@@ -51,6 +55,21 @@ class SessionInfo:
         m = (ts % 3600) // 60
         s = ts % 60
         return f"{h:02d}:{m:02d}:{s:02d}"
+
+def get_foreground_window_aumid():
+    try:
+        hwnd = win32gui.GetForegroundWindow()
+        if hwnd:
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            process = Process(pid)
+            # This is a simplification. A robust solution might need to check
+            # the process executable path against a known list for the player.
+            # AUMID is not directly retrievable from process info alone.
+            # We will use process name as a proxy.
+            return process.name()
+    except Exception as e:
+        print(f"Error getting foreground window info: {e}")
+    return None
 
 class MediaMonitor:
     """
