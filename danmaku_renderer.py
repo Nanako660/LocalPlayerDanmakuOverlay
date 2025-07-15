@@ -1,4 +1,4 @@
-# danmaku_renderer.py (v20 - Opacity and Adaptive Spacing)
+# danmaku_renderer.py (v21 - Object Pool Optimization)
 import sys
 import random
 import time
@@ -15,6 +15,9 @@ except ImportError:
     PYWIN32_AVAILABLE = False
     print("警告: pywin32 库未安装，置顶策略2和3将不可用。")
 
+# 假设 danmaku_models.py 很快会提供
+# 我们在这里临时创建一个占位符，以便代码在逻辑上是完整的
+# 稍后你需要用你的实际文件替换它
 from danmaku_models import ActiveDanmaku
 
 class DanmakuWindow(QMainWindow):
@@ -35,16 +38,36 @@ class DanmakuWindow(QMainWindow):
 
         self.setGeometry(self.config.screen_geometry)
 
-        self._active_danmaku = []
+        # ==================== 对象池优化 START ====================
+        # 移除了 self._active_danmaku = [] 的旧初始化方式
         self._font = QFont(self.config.font_name, self.config.font_size, QFont.Weight.Bold)
         self._font_metrics = QFontMetrics(self._font)
 
-        # ==================== 自适应行间距修复 ====================
+        # 1. 创建对象池和空闲队列
+        # _danmaku_pool 持有所有对象实例的引用
+        # _free_danmaku 是一个双端队列，用于快速获取空闲对象
+        # _active_danmaku 列表现在只包含屏幕上活动的弹幕对象
+        print(f"正在初始化对象池，容量: {self.config.max_danmaku_count}...")
+        self._danmaku_pool = []
+        self._free_danmaku = deque()
+        self._active_danmaku = []
+
+        # 2. 预先分配所有弹幕对象
+        # 这一步是对象池的核心，在启动时一次性创建所有需要的对象
+        for _ in range(self.config.max_danmaku_count):
+            # 注意：这里假设 ActiveDanmaku 有一个无需参数的构造函数
+            # 或者可以接受一些默认值。
+            # 稍后我们将为其添加一个 init 方法用于重置状态。
+            danmaku_obj = ActiveDanmaku("", QColor(), 0, 0, 0, self.config)
+            self._danmaku_pool.append(danmaku_obj)
+            self._free_danmaku.append(danmaku_obj)
+        print("对象池初始化完成。")
+        # ==================== 对象池优化 END ======================
+
         font_height = self._font_metrics.height()
         line_spacing = int(font_height * self.config.line_spacing_ratio)
         self.track_height = font_height + line_spacing
         self.y_offset = self._font_metrics.ascent() + 5
-        # ========================================================
         
         num_tracks = self.config.max_tracks
         self._scroll_tracks = [0] * num_tracks
@@ -60,7 +83,7 @@ class DanmakuWindow(QMainWindow):
         try:
             strategy = int(self.config.ontop_strategy)
         except (ValueError, TypeError):
-            strategy = 1 # Default to a safe value if conversion fails
+            strategy = 1
             print(f"警告: 无效的置顶策略值 '{self.config.ontop_strategy}'。将使用默认值 1。")
 
         print(f"当前置顶策略: {strategy}")
@@ -81,8 +104,12 @@ class DanmakuWindow(QMainWindow):
                     self._on_top_timer.start(2000)
     
     def add_danmaku(self, danmaku_data):
-        if len(self._active_danmaku) >= self.config.max_danmaku_count:
+        # ==================== 对象池优化 START ====================
+        # 3. 从池中获取对象，而不是创建新对象
+        # 如果空闲队列为空，说明达到了弹幕数量上限
+        if not self._free_danmaku:
             return
+        # ==================== 对象池优化 END ======================
 
         text_width = self._font_metrics.horizontalAdvance(danmaku_data.text)
         y_pos = 0
@@ -90,18 +117,11 @@ class DanmakuWindow(QMainWindow):
         track_found = False
         if danmaku_data.mode == 1:
             track_list = self._scroll_tracks
-            
-            # More robust track finding: find all available, then pick one randomly.
-            # This is better than random probing which might fail even if tracks are free.
             available_tracks = [i for i, t in enumerate(track_list) if time.monotonic() > t]
-            
             if not available_tracks:
-                return # No track available, so we drop the danmaku.
-            
+                return
             track_idx = random.choice(available_tracks)
             y_pos = (track_idx * self.track_height) + self.y_offset
-            
-            # Estimate when the track will be free again. 0.8 is a factor to allow some overlap.
             track_list[track_idx] = time.monotonic() + (text_width / self.config.scroll_speed) * 0.8
             track_found = True
         elif danmaku_data.mode == 5:
@@ -122,9 +142,19 @@ class DanmakuWindow(QMainWindow):
                     track_found = True
                     break
             if not track_found: return
-            
-        new_active_danmaku = ActiveDanmaku(danmaku_data.text, danmaku_data.color, danmaku_data.mode, y_pos, text_width, self.config)
-        self._active_danmaku.append(new_active_danmaku)
+
+        # ==================== 对象池优化 START ====================
+        # 4. 重用并初始化对象
+        # 从空闲队列中取出一个对象
+        danmaku_obj = self._free_danmaku.popleft()
+        
+        # 使用新的 init 方法重置其状态
+        # 这一步是关键，它取代了 ActiveDanmaku(...) 的调用
+        danmaku_obj.init(danmaku_data.text, danmaku_data.color, danmaku_data.mode, y_pos, text_width, self.config)
+        
+        # 将初始化后的对象加入到活动列表中
+        self._active_danmaku.append(danmaku_obj)
+        # ==================== 对象池优化 END ======================
 
     def pause(self):
         if self._animation_timer.isActive():
@@ -140,10 +170,6 @@ class DanmakuWindow(QMainWindow):
         delta_time = 1 / 60
         current_time = time.monotonic()
 
-        # In-place update to avoid list allocation.
-        # We move all active danmaku to the beginning of the list
-        # and then truncate it. This is more memory-efficient than
-        # creating a new list in every frame, especially with many danmaku.
         active_count = 0
         for i in range(len(self._active_danmaku)):
             d = self._active_danmaku[i]
@@ -152,6 +178,15 @@ class DanmakuWindow(QMainWindow):
                     self._active_danmaku[active_count] = d
                 active_count += 1
         
+        # ==================== 对象池优化 START ====================
+        # 5. 将不再活动的对象归还到池中
+        # 遍历那些从活动列表中“掉队”的对象
+        for i in range(active_count, len(self._active_danmaku)):
+            # 将它们加回到空闲队列的末尾，以备将来重用
+            self._free_danmaku.append(self._active_danmaku[i])
+        # ==================== 对象池优化 END ======================
+
+        # 截断活动列表，只保留仍在屏幕上的弹幕
         del self._active_danmaku[active_count:]
 
         self.update()
@@ -164,6 +199,10 @@ class DanmakuWindow(QMainWindow):
             return current_time < danmaku.disappear_time
 
     def clear_danmaku(self):
+        # ==================== 对象池优化 START ====================
+        # 6. 清空时，将所有活动对象归还到池中
+        self._free_danmaku.extend(self._active_danmaku)
+        # ==================== 对象池优化 END ======================
         self._active_danmaku.clear()
         self.update()
 
@@ -172,9 +211,7 @@ class DanmakuWindow(QMainWindow):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setFont(self._font)
 
-        # ==================== 透明度配置应用 ====================
         painter.setOpacity(self.config.opacity)
-        # ========================================================
         
         for danmaku in self._active_danmaku:
             pen = QPen(QColor("black"), self.config.stroke_width)
@@ -188,7 +225,6 @@ class DanmakuWindow(QMainWindow):
             painter.setPen(danmaku.color)
             painter.drawText(p, danmaku.text)
         
-        # 恢复不透明度，确保Debug信息清晰
         painter.setOpacity(1.0)
         
         if self.config.debug:
@@ -204,7 +240,8 @@ class DanmakuWindow(QMainWindow):
             fps = (len(self._paint_times) - 1) / elapsed if elapsed > 0 else 0
         else:
             fps = 0
-        debug_text = f"FPS: {fps:.1f}\nDanmaku: {len(self._active_danmaku)}"
+        # 在调试信息中也显示池的状态
+        debug_text = f"FPS: {fps:.1f}\nDanmaku: {len(self._active_danmaku)} / {self.config.max_danmaku_count}"
         painter.setPen(QColor("lime"))
         debug_font = QFont("Consolas", 12)
         painter.setFont(debug_font)
