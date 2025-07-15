@@ -1,0 +1,14 @@
+# Python 项目依赖文件
+# 使用 "pip install -r requirements.txt" 命令来安装所有依赖。
+
+# 核心图形用户界面 (GUI) 框架
+PyQt6
+
+# 用于与 Windows API 交互，例如窗口置顶和获取前台窗口
+pywin32
+
+# 用于获取系统进程信息，在新版的焦点检测逻辑中需要用到
+psutil
+
+# 用于与 Windows 系统媒体传输控件 (SMTC) 交互，以同步播放器状态
+winsdk

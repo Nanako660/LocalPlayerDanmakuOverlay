@@ -1,11 +1,18 @@
-# danmaku_renderer.py (v21 - Object Pool Optimization)
-import sys
-import random
+# danmaku_renderer.py
+import logging
 import time
+import random
 from collections import deque
-from PyQt6.QtWidgets import QApplication, QMainWindow
-from PyQt6.QtCore import Qt, QTimer, QPointF
-from PyQt6.QtGui import QFont, QPainter, QColor, QPen, QFontMetrics, QScreen
+from PyQt6.QtWidgets import QMainWindow, QApplication
+from PyQt6.QtCore import Qt, QTimer, QPointF, QSize
+from PyQt6.QtGui import (
+    QFont, QPainter, QColor, QFontMetrics, QPainterPath,
+    QPainterPathStroker, QPixmap
+)
+
+from config_loader import get_config
+from danmaku_models import DanmakuData, ActiveDanmaku
+from debug_overlay import DebugOverlay
 
 try:
     import win32gui
@@ -13,264 +20,201 @@ try:
     PYWIN32_AVAILABLE = True
 except ImportError:
     PYWIN32_AVAILABLE = False
-    print("警告: pywin32 库未安装，置顶策略2和3将不可用。")
 
-# 假设 danmaku_models.py 很快会提供
-# 我们在这里临时创建一个占位符，以便代码在逻辑上是完整的
-# 稍后你需要用你的实际文件替换它
-from danmaku_models import ActiveDanmaku
 
 class DanmakuWindow(QMainWindow):
-    def __init__(self, config, parent=None):
+    # ======================= 核心修正点 =======================
+    def __init__(self, total_danmaku_count: int, parent=None):
+    # ========================================================
         super().__init__(parent)
-        self.config = config
+        self.config = get_config()
         self.config.screen_geometry = QApplication.primaryScreen().geometry()
-        
+
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        
+
         if not self.config.debug:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self.setGeometry(self.config.screen_geometry)
-
-        # ==================== 对象池优化 START ====================
-        # 移除了 self._active_danmaku = [] 的旧初始化方式
         self._font = QFont(self.config.font_name, self.config.font_size, QFont.Weight.Bold)
         self._font_metrics = QFontMetrics(self._font)
 
-        # 1. 创建对象池和空闲队列
-        # _danmaku_pool 持有所有对象实例的引用
-        # _free_danmaku 是一个双端队列，用于快速获取空闲对象
-        # _active_danmaku 列表现在只包含屏幕上活动的弹幕对象
-        print(f"正在初始化对象池，容量: {self.config.max_danmaku_count}...")
-        self._danmaku_pool = []
-        self._free_danmaku = deque()
+        pool_size = self.config.max_danmaku_count
+        logging.info(f"Initializing object pool with size: {pool_size}")
+        self._danmaku_pool = [ActiveDanmaku() for _ in range(pool_size)]
+        self._free_danmaku = deque(self._danmaku_pool)
         self._active_danmaku = []
-
-        # 2. 预先分配所有弹幕对象
-        # 这一步是对象池的核心，在启动时一次性创建所有需要的对象
-        for _ in range(self.config.max_danmaku_count):
-            # 注意：这里假设 ActiveDanmaku 有一个无需参数的构造函数
-            # 或者可以接受一些默认值。
-            # 稍后我们将为其添加一个 init 方法用于重置状态。
-            danmaku_obj = ActiveDanmaku("", QColor(), 0, 0, 0, self.config)
-            self._danmaku_pool.append(danmaku_obj)
-            self._free_danmaku.append(danmaku_obj)
-        print("对象池初始化完成。")
-        # ==================== 对象池优化 END ======================
 
         font_height = self._font_metrics.height()
         line_spacing = int(font_height * self.config.line_spacing_ratio)
         self.track_height = font_height + line_spacing
         self.y_offset = self._font_metrics.ascent() + 5
-        
         num_tracks = self.config.max_tracks
         self._scroll_tracks = [0] * num_tracks
         self._top_tracks = [0] * num_tracks
         self._bottom_tracks = [0] * num_tracks
 
-        self._paint_times = deque(maxlen=60)
-
+        # ======================= 核心修正点 =======================
+        # 创建 DebugOverlay 时，将弹幕总数传递进去
+        if self.config.debug:
+            self.debug_overlay = DebugOverlay(self, self.config, total_danmaku_count)
+        else:
+            self.debug_overlay = None
+        # ========================================================
+        
         self._animation_timer = QTimer(self)
         self._animation_timer.timeout.connect(self.update_states)
         self._animation_timer.start(1000 // 60)
 
+        self._on_top_timer = QTimer(self)
+        self._on_top_timer.timeout.connect(self._force_on_top_win32_if_needed)
+
+    def set_stay_on_top(self, stay_on_top: bool):
+        current_on_top_flag = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+        if current_on_top_flag == stay_on_top:
+            return
+
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, stay_on_top)
+
+        if stay_on_top and int(self.config.ontop_strategy) > 1:
+            if not self._on_top_timer.isActive():
+                self._on_top_timer.start(2000)
+        else:
+            if self._on_top_timer.isActive():
+                self._on_top_timer.stop()
+        self.show()
+
+    def _force_on_top_win32_if_needed(self):
+        strategy = int(self.config.ontop_strategy)
+        if not PYWIN32_AVAILABLE or strategy < 2: return
         try:
-            strategy = int(self.config.ontop_strategy)
-        except (ValueError, TypeError):
-            strategy = 1
-            print(f"警告: 无效的置顶策略值 '{self.config.ontop_strategy}'。将使用默认值 1。")
+            hwnd = int(self.winId())
+            if strategy == 2:
+                win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0,0,0,0,
+                                      win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+            elif strategy == 3:
+                style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+                if not (style & win32con.WS_EX_TOPMOST):
+                    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0,0,0,0,
+                                          win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+        except Exception as e:
+            logging.error(f"Win32置顶错误: {e}")
+            self._on_top_timer.stop()
 
-        print(f"当前置顶策略: {strategy}")
-
-        if strategy != 0:
-            if strategy in [2, 3] and not PYWIN32_AVAILABLE:
-                print("警告: Win32 策略需要 'pywin32' 库。请运行 'pip install pywin32'。")
-            else:
-                self._on_top_timer = QTimer(self)
-                if strategy == 1:
-                    self._on_top_timer.timeout.connect(self._force_on_top_qt)
-                elif strategy == 2:
-                    self._on_top_timer.timeout.connect(self._force_on_top_win32_unconditional)
-                elif strategy == 3:
-                    self._on_top_timer.timeout.connect(self._check_and_force_on_top_win32)
-                
-                if self._on_top_timer.receivers(self._on_top_timer.timeout) > 0:
-                    self._on_top_timer.start(2000)
-    
-    def add_danmaku(self, danmaku_data):
-        # ==================== 对象池优化 START ====================
-        # 3. 从池中获取对象，而不是创建新对象
-        # 如果空闲队列为空，说明达到了弹幕数量上限
+    def add_danmaku(self, danmaku_data: DanmakuData):
         if not self._free_danmaku:
             return
-        # ==================== 对象池优化 END ======================
-
         text_width = self._font_metrics.horizontalAdvance(danmaku_data.text)
-        y_pos = 0
-
-        track_found = False
-        if danmaku_data.mode == 1:
-            track_list = self._scroll_tracks
-            available_tracks = [i for i, t in enumerate(track_list) if time.monotonic() > t]
-            if not available_tracks:
-                return
-            track_idx = random.choice(available_tracks)
-            y_pos = (track_idx * self.track_height) + self.y_offset
-            track_list[track_idx] = time.monotonic() + (text_width / self.config.scroll_speed) * 0.8
-            track_found = True
-        elif danmaku_data.mode == 5:
-            track_list = self._top_tracks
-            for i, track_time in enumerate(track_list):
-                if time.monotonic() > track_time:
-                    y_pos = (i * self.track_height) + self.y_offset
-                    track_list[i] = time.monotonic() + (self.config.fixed_duration_ms / 1000)
-                    track_found = True
-                    break
-            if not track_found: return
-        elif danmaku_data.mode == 4:
-            track_list = self._bottom_tracks
-            for i, track_time in enumerate(track_list):
-                if time.monotonic() > track_time:
-                    y_pos = self.height() - ((i + 1) * self.track_height)
-                    track_list[i] = time.monotonic() + (self.config.fixed_duration_ms / 1000)
-                    track_found = True
-                    break
-            if not track_found: return
-
-        # ==================== 对象池优化 START ====================
-        # 4. 重用并初始化对象
-        # 从空闲队列中取出一个对象
+        y_pos, track_found = self._find_track(danmaku_data, text_width)
+        if not track_found: return
         danmaku_obj = self._free_danmaku.popleft()
-        
-        # 使用新的 init 方法重置其状态
-        # 这一步是关键，它取代了 ActiveDanmaku(...) 的调用
-        danmaku_obj.init(danmaku_data.text, danmaku_data.color, danmaku_data.mode, y_pos, text_width, self.config)
-        
-        # 将初始化后的对象加入到活动列表中
+        danmaku_obj.init(danmaku_data, y_pos, text_width, self.config)
         self._active_danmaku.append(danmaku_obj)
-        # ==================== 对象池优化 END ======================
-
-    def pause(self):
-        if self._animation_timer.isActive():
-            self._animation_timer.stop()
-            print("Danmaku rendering paused.")
-
-    def resume(self):
-        if not self._animation_timer.isActive():
-            self._animation_timer.start(1000 // 60)
-            print("Danmaku rendering resumed.")
 
     def update_states(self):
         delta_time = 1 / 60
         current_time = time.monotonic()
-
-        active_count = 0
-        for i in range(len(self._active_danmaku)):
-            d = self._active_danmaku[i]
-            if self.is_danmaku_active(d, current_time, delta_time):
-                if i != active_count:
-                    self._active_danmaku[active_count] = d
-                active_count += 1
-        
-        # ==================== 对象池优化 START ====================
-        # 5. 将不再活动的对象归还到池中
-        # 遍历那些从活动列表中“掉队”的对象
-        for i in range(active_count, len(self._active_danmaku)):
-            # 将它们加回到空闲队列的末尾，以备将来重用
-            self._free_danmaku.append(self._active_danmaku[i])
-        # ==================== 对象池优化 END ======================
-
-        # 截断活动列表，只保留仍在屏幕上的弹幕
-        del self._active_danmaku[active_count:]
-
+        still_active = []
+        for d in self._active_danmaku:
+            if d.is_active(current_time, delta_time):
+                still_active.append(d)
+            else:
+                self._free_danmaku.append(d)
+        self._active_danmaku = still_active
+        if self.debug_overlay:
+            self.debug_overlay.update_stats(
+                active_count=len(self._active_danmaku),
+                pool_free=len(self._free_danmaku)
+            )
         self.update()
 
-    def is_danmaku_active(self, danmaku, current_time, delta_time):
-        if danmaku.mode_is_scroll():
-            danmaku.position.setX(danmaku.position.x() - danmaku.speed * delta_time)
-            return danmaku.position.x() + danmaku.width > 0
-        else:
-            return current_time < danmaku.disappear_time
+    def _render_danmaku_to_pixmap(self, danmaku: ActiveDanmaku):
+        stroke_offset = self.config.stroke_width
+        bounding_rect = self._font_metrics.boundingRect(danmaku.text)
+        pixmap_size = QSize(bounding_rect.width() + stroke_offset * 2, bounding_rect.height() + stroke_offset * 2)
 
-    def clear_danmaku(self):
-        # ==================== 对象池优化 START ====================
-        # 6. 清空时，将所有活动对象归还到池中
-        self._free_danmaku.extend(self._active_danmaku)
-        # ==================== 对象池优化 END ======================
-        self._active_danmaku.clear()
-        self.update()
+        pixmap = QPixmap(pixmap_size)
+        pixmap.fill(Qt.GlobalColor.transparent)
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
+        painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setFont(self._font)
 
+        path = QPainterPath()
+        path.addText(stroke_offset, self._font_metrics.ascent() + stroke_offset, self._font, danmaku.text)
+
+        if self.config.stroke_width > 0:
+            stroker = QPainterPathStroker()
+            stroker.setWidth(self.config.stroke_width * 2)
+            stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+            stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            stroke_path = stroker.createStroke(path)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.fillPath(stroke_path, QColor("black"))
+
+        painter.fillPath(path, danmaku.color)
+        painter.end()
+
+        danmaku.pixmap_cache = pixmap
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
         painter.setOpacity(self.config.opacity)
-        
+
         for danmaku in self._active_danmaku:
-            pen = QPen(QColor("black"), self.config.stroke_width)
-            painter.setPen(pen)
-            p = danmaku.position
-            for dx in [-1, 0, 1]:
-                for dy in [-1, 0, 1]:
-                    if dx == 0 and dy == 0: continue
-                    painter.drawText(QPointF(p.x() + dx, p.y() + dy), danmaku.text)
-            
-            painter.setPen(danmaku.color)
-            painter.drawText(p, danmaku.text)
-        
+            if danmaku.pixmap_cache is None:
+                self._render_danmaku_to_pixmap(danmaku)
+
+            if danmaku.pixmap_cache:
+                draw_pos = QPointF(danmaku.position.x() - self.config.stroke_width,
+                                   danmaku.position.y() - self.config.stroke_width - self._font_metrics.ascent())
+                painter.drawPixmap(draw_pos, danmaku.pixmap_cache)
+
         painter.setOpacity(1.0)
+
+        if self.debug_overlay:
+            self.debug_overlay.paint(painter)
+
+    def clear_danmaku(self):
+        self._free_danmaku.extend(self._active_danmaku)
+        self._active_danmaku.clear()
+        self.update()
+
+    def pause(self):
+        if self._animation_timer.isActive():
+            self._animation_timer.stop()
+
+    def resume(self):
+        if not self._animation_timer.isActive():
+            self._animation_timer.start(1000 // 60)
+
+    def _find_track(self, danmaku_data, text_width):
+        current_time = time.monotonic()
+        mode = danmaku_data.mode
         
-        if self.config.debug:
-            self._paint_debug_info(painter)
-
-    def _paint_debug_info(self, painter: QPainter):
-        painter.setPen(QPen(QColor("red"), 2))
-        painter.drawRect(self.rect().adjusted(1, 1, -1, -1))
-        now = time.monotonic()
-        self._paint_times.append(now)
-        if len(self._paint_times) > 1:
-            elapsed = self._paint_times[-1] - self._paint_times[0]
-            fps = (len(self._paint_times) - 1) / elapsed if elapsed > 0 else 0
-        else:
-            fps = 0
-        # 在调试信息中也显示池的状态
-        debug_text = f"FPS: {fps:.1f}\nDanmaku: {len(self._active_danmaku)} / {self.config.max_danmaku_count}"
-        painter.setPen(QColor("lime"))
-        debug_font = QFont("Consolas", 12)
-        painter.setFont(debug_font)
-        pos_map = {'top_left': Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
-                   'top_right': Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
-                   'bottom_right': Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight,
-                   'bottom_left': Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft}
-        alignment = pos_map.get(self.config.debug_info_position, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
-        painter.drawText(self.rect().adjusted(10, 10, -10, -10), int(alignment), debug_text)
-
-    def _force_on_top_qt(self):
-        if self.isMinimized(): return
-        self.raise_()
-        self.activateWindow()
-
-    def _force_on_top_win32_unconditional(self):
-        if not PYWIN32_AVAILABLE: return
-        try:
-            win32gui.SetWindowPos(int(self.winId()), win32con.HWND_TOPMOST, 0, 0, 0, 0,
-                                  win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
-        except Exception: pass
-
-    def _check_and_force_on_top_win32(self):
-        if not PYWIN32_AVAILABLE: return
-        try:
-            hwnd = int(self.winId())
-            style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
-            if not (style & win32con.WS_EX_TOPMOST):
-                print("检测到窗口被覆盖，正在尝试恢复置顶...")
-                win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
-                                      win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
-        except Exception: pass
+        if mode == 1:
+            available_tracks = [i for i, t in enumerate(self._scroll_tracks) if current_time > t]
+            if not available_tracks: return 0, False
+            track_idx = random.choice(available_tracks)
+            y_pos = (track_idx * self.track_height) + self.y_offset
+            self._scroll_tracks[track_idx] = current_time + (text_width / self.config.scroll_speed) * 0.8
+            return y_pos, True
+        elif mode == 5:
+            for i, track_time in enumerate(self._top_tracks):
+                if current_time > track_time:
+                    y_pos = (i * self.track_height) + self.y_offset
+                    self._top_tracks[i] = current_time + (self.config.fixed_duration_ms / 1000)
+                    return y_pos, True
+            return 0, False
+        elif mode == 4:
+            for i, track_time in enumerate(self._bottom_tracks):
+                if current_time > track_time:
+                    y_pos = self.height() - ((i + 1) * self.track_height)
+                    self._bottom_tracks[i] = current_time + (self.config.fixed_duration_ms / 1000)
+                    return y_pos, True
+            return 0, False
+        return 0, False

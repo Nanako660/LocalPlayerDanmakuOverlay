@@ -1,11 +1,19 @@
-# danmaku_models.py (v2 - Object Pool Support)
+# danmaku_models.py
+import time
 from PyQt6.QtCore import QPointF
 from PyQt6.QtGui import QColor
-import time
-import random
+
+# 导入Config类仅用于类型注解，避免循环导入
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from config_loader import Config
+
 
 class DanmakuData:
-    """存储从XML加载的原始弹幕信息。"""
+    """
+    存储从XML文件解析出的原始、静态的弹幕数据。
+    这是一个纯数据类，在程序运行期间其属性不会改变。
+    """
     def __init__(self, start_time: float, mode: int, text: str, color: QColor):
         self.start_time = start_time
         self.mode = mode
@@ -13,41 +21,51 @@ class DanmakuData:
         self.color = color
 
 class ActiveDanmaku:
-    """存储屏幕上活动弹幕的实时状态。"""
-    def __init__(self, text: str, color: QColor, mode: int, y_pos: float, width: int, config):
-        # ==================== 对象池优化 START ====================
-        # 构造函数现在直接调用新的init方法。
-        # 这样无论是首次创建还是后续重用，逻辑都保持一致。
-        self.init(text, color, mode, y_pos, width, config)
-        # ==================== 对象池优化 END ======================
+    def __init__(self):
+        self.text: str = ""
+        self.color: QColor = QColor()
+        self.mode: int = 0
+        self.width: int = 0
+        self.position: QPointF = QPointF()
+        self.speed: float = 0
+        self.disappear_time: float = 0.0
+        # 【新增】用于缓存渲染好的弹幕图片
+        self.pixmap_cache: QPixmap | None = None
 
-    # ==================== 对象池优化 START ====================
-    # 1. 添加 init 方法
-    # 这个方法是对象池优化的核心。它允许我们重用一个已经存在的 ActiveDanmaku 对象，
-    # 用新的数据重新初始化它，而不是销毁旧的、创建新的。
-    def init(self, text: str, color: QColor, mode: int, y_pos: float, width: int, config):
-        """重置并初始化一个弹幕对象的状态。"""
-        self.text = text
-        self.color = color
-        self.mode = mode
+    def init(self, data: DanmakuData, y_pos: float, width: int, config: 'Config'):
+        self.text = data.text
+        self.color = data.color
+        self.mode = data.mode
         self.width = width
+        # 【新增】重置缓存
+        self.pixmap_cache = None
         
         screen_width = config.screen_geometry.width()
 
-        if self.mode_is_scroll():
-            # 重置滚动弹幕的起始位置和速度
+        if self.mode == 1:
             self.position = QPointF(screen_width, y_pos)
             self.speed = config.scroll_speed
-            # 确保旧的计时属性被清除或设为无效值
-            self.disappear_time = float('inf') 
-        else: # 顶部或底部弹幕
-            # 重置固定弹幕的起始位置和生命周期
+            self.disappear_time = float('inf')
+        else:
             self.position = QPointF((screen_width - width) / 2, y_pos)
             self.speed = 0
-            # creation_time 和 disappear_time 必须在每次重用时都重新计算
-            self.creation_time = time.monotonic()
-            self.disappear_time = self.creation_time + (config.fixed_duration_ms / 1000)
-    # ==================== 对象池优化 END ======================
+            current_time = time.monotonic()
+            self.disappear_time = current_time + (config.fixed_duration_ms / 1000)
 
-    def mode_is_scroll(self) -> bool:
-        return self.mode in [1, 2, 3]
+    def is_active(self, current_time: float, delta_time: float) -> bool:
+        """
+        判断弹幕在当前帧是否仍然处于活动状态，并更新其位置。
+
+        Args:
+            current_time (float): 当前时间戳 (来自 time.monotonic())。
+            delta_time (float): 距离上一帧的时间差（秒）。
+
+        Returns:
+            bool: 如果弹幕仍然活动（可见），返回True，否则返回False。
+        """
+        if self.mode == 1:
+            self.position.setX(self.position.x() - self.speed * delta_time)
+            # 如果弹幕的右边缘仍在屏幕左侧之外，则为活动状态
+            return self.position.x() + self.width > 0
+        else:
+            return current_time < self.disappear_time
