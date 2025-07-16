@@ -57,11 +57,11 @@ class MediaSyncWorker(QObject):
 
 
 class DanmakuController(QObject):
-    def __init__(self, main_window_hwnd: int):
+    def __init__(self, main_window_hwnd: int, monitor: MediaMonitor | None = None):
         super().__init__()
         self.config = get_config()
         self.main_window_hwnd = main_window_hwnd
-        self.monitor = MediaMonitor()
+        self.monitor = monitor or MediaMonitor()
         self._self_proc_name = psutil.Process(os.getpid()).name().lower()
         
         self.renderer: DanmakuWindow | None = None
@@ -110,7 +110,7 @@ class DanmakuController(QObject):
 
         # 创建渲染器时，将弹幕总数传递进去
         self.renderer = DanmakuWindow(total_danmaku_count=len(self.all_danmaku))
-        
+
         try:
             asyncio.run(self._discover_sessions())
         except Exception as e:

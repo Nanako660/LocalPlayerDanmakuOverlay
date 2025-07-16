@@ -1,48 +1,40 @@
 # control_panel.py
 import logging
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QStackedWidget,
-    QLabel, QPushButton, QFormLayout, QSpinBox, QDoubleSpinBox, QComboBox,
-    QLineEdit, QCheckBox, QFileDialog, QListWidgetItem, QPlainTextEdit,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QStackedWidget, 
+    QLabel, QPushButton, QFormLayout, QSpinBox, QDoubleSpinBox, QComboBox, 
+    QLineEdit, QCheckBox, QFileDialog, QListWidgetItem, QPlainTextEdit, 
     QMessageBox
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 
-# 【重要】导入单例获取函数
 from config_loader import get_config
 from logger_setup import LogSignals
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from danmaku_controller import DanmakuController
 
-
+# (LogWidget, MainWindow, MainWidget 类无变化，此处省略以保持简洁)
 class LogWidget(QWidget):
-    """用于显示实时日志的UI组件。"""
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-
         self.log_display = QPlainTextEdit()
         self.log_display.setReadOnly(True)
         self.log_display.setFont(QFont("Consolas", 10))
-
         layout.addWidget(self.log_display)
-
     def append_log(self, message: str):
         self.log_display.appendPlainText(message)
 
 class MainWindow(QMainWindow):
-    """应用程序的主窗口（控制面板UI）。"""
     def __init__(self, log_signals: LogSignals):
         super().__init__()
-        # 【修正】直接通过 get_config() 获取单例，不再通过构造函数传递
         self.config = get_config()
         self.controller: 'DanmakuController' | None = None
         self.setWindowTitle("本地弹幕播放器控制台")
         self.resize(800, 600)
-
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
@@ -53,62 +45,46 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.nav_bar)
         self.stacked_widget = QStackedWidget()
         main_layout.addWidget(self.stacked_widget)
-
-        # ======================= 核心修正点 =======================
-        # 创建子组件时，不再传递 config 参数，因为它们会自己获取单例
         self.main_widget = MainWidget()
         self.settings_widget = SettingsWidget(main_window=self)
-        # ========================================================
-        
         self.log_widget = LogWidget()
-
         self.stacked_widget.addWidget(self.main_widget)
         self.stacked_widget.addWidget(self.settings_widget)
         self.stacked_widget.addWidget(self.log_widget)
-
         self.setup_nav()
         self.nav_bar.currentRowChanged.connect(self.stacked_widget.setCurrentIndex)
-        
         log_signals.log_message.connect(self.log_widget.append_log)
-
     def set_controller(self, controller: 'DanmakuController'):
         self.controller = controller
         self.main_widget.start_button.clicked.connect(self.start_danmaku)
         self.main_widget.stop_button.clicked.connect(self.stop_danmaku)
         self.settings_widget.set_controller(controller)
-
     def start_danmaku(self):
         if not self.controller: return
         danmaku_path = self.main_widget.path_input.text()
         if not danmaku_path:
             logging.error("请先选择一个弹幕文件。")
             return
-            
         self.controller.start(danmaku_path)
         self.main_widget.start_button.setEnabled(False)
         self.main_widget.stop_button.setEnabled(True)
-
     def stop_danmaku(self):
         if not self.controller: return
         self.controller.stop()
         self.main_widget.start_button.setEnabled(True)
         self.main_widget.stop_button.setEnabled(False)
-        
     def closeEvent(self, event):
         self.stop_danmaku()
         event.accept()
-        
     def setup_nav(self):
         self.nav_bar.addItem(QListWidgetItem("主界面"))
         self.nav_bar.addItem(QListWidgetItem("设置"))
         self.nav_bar.addItem(QListWidgetItem("日志"))
         self.nav_bar.setCurrentRow(0)
 
-
 class SettingsWidget(QWidget):
     def __init__(self, main_window: MainWindow, parent=None):
         super().__init__(parent)
-        # 【修正】直接通过 get_config() 获取单例
         self.config = get_config()
         self.main_window = main_window
         self.controller = None
@@ -127,6 +103,7 @@ class SettingsWidget(QWidget):
         self.max_danmaku_input = QSpinBox()
         self.max_tracks_input = QSpinBox()
         self.line_spacing_input = QDoubleSpinBox()
+        self.allow_overlap_checkbox = QCheckBox() # 【新增】
         self.target_aumid_input = QLineEdit()
         self.ontop_strategy_input = QComboBox()
         self.debug_mode_checkbox = QCheckBox()
@@ -146,6 +123,7 @@ class SettingsWidget(QWidget):
         form_layout.addRow("最大弹幕数(对象池):", self.max_danmaku_input)
         form_layout.addRow("最大滚动轨道数:", self.max_tracks_input)
         form_layout.addRow("轨道行间距比例:", self.line_spacing_input)
+        form_layout.addRow("允许弹幕重叠:", self.allow_overlap_checkbox) # 【新增】
         form_layout.addRow("--- 同步与行为 ---", None)
         form_layout.addRow("目标播放器AUMID:", self.target_aumid_input)
         form_layout.addRow("置顶策略 (0:无):", self.ontop_strategy_input)
@@ -156,17 +134,14 @@ class SettingsWidget(QWidget):
         form_layout.addRow("保存日志到文件:", self.log_to_file_checkbox)
 
         layout.addLayout(form_layout)
-
+        # (按钮部分无变化)
         button_layout = QHBoxLayout()
         self.apply_button = QPushButton("应用设置")
         self.restore_button = QPushButton("恢复默认配置")
-        
         button_layout.addStretch()
         button_layout.addWidget(self.apply_button)
         button_layout.addWidget(self.restore_button)
-        
         layout.addLayout(button_layout)
-
         self.apply_button.clicked.connect(self._apply_settings)
         self.restore_button.clicked.connect(self._restore_defaults)
 
@@ -194,7 +169,9 @@ class SettingsWidget(QWidget):
             self._hot_reload_danmaku()
 
     def _update_inputs_from_config(self):
-        # (此方法无变化)
+        # (大部分无变化)
+        self.allow_overlap_checkbox.setChecked(self.config.allow_overlap) # 【新增】
+        # ... 其他控件更新 ...
         self.font_name_input.setText(self.config.font_name)
         self.font_size_input.setRange(10, 72)
         self.font_size_input.setValue(self.config.font_size)
@@ -229,7 +206,9 @@ class SettingsWidget(QWidget):
         self.log_to_file_checkbox.setChecked(self.config.log_to_file)
 
     def _update_config_from_inputs(self):
-        # (此方法无变化)
+        # (大部分无变化)
+        self.config.allow_overlap = self.allow_overlap_checkbox.isChecked() # 【新增】
+        # ... 其他配置更新 ...
         self.config.font_name = self.font_name_input.text()
         self.config.font_size = self.font_size_input.value()
         self.config.stroke_width = self.stroke_width_input.value()
@@ -250,10 +229,8 @@ class SettingsWidget(QWidget):
         self.controller = controller
 
 class MainWidget(QWidget):
-    """主操作界面的UI组件。"""
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 【修正】直接通过 get_config() 获取单例
         self.config = get_config()
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -278,7 +255,6 @@ class MainWidget(QWidget):
         control_layout.addStretch()
         layout.addLayout(control_layout)
         layout.addStretch(1)
-
     def browse_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "选择弹幕文件", "", "XML 文件 (*.xml);;所有文件 (*)")

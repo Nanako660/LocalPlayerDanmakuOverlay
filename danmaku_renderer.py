@@ -23,32 +23,23 @@ except ImportError:
 
 
 class DanmakuWindow(QMainWindow):
-    # ======================= 核心修正点 =======================
     def __init__(self, total_danmaku_count: int, parent=None):
-    # ========================================================
         super().__init__(parent)
         self.config = get_config()
+        # ... (其余初始化代码无变化)
         self.config.screen_geometry = QApplication.primaryScreen().geometry()
-
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.Tool
-        )
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-
         if not self.config.debug:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
         self.setGeometry(self.config.screen_geometry)
         self._font = QFont(self.config.font_name, self.config.font_size, QFont.Weight.Bold)
         self._font_metrics = QFontMetrics(self._font)
-
         pool_size = self.config.max_danmaku_count
         logging.info(f"Initializing object pool with size: {pool_size}")
         self._danmaku_pool = [ActiveDanmaku() for _ in range(pool_size)]
         self._free_danmaku = deque(self._danmaku_pool)
         self._active_danmaku = []
-
         font_height = self._font_metrics.height()
         line_spacing = int(font_height * self.config.line_spacing_ratio)
         self.track_height = font_height + line_spacing
@@ -57,29 +48,79 @@ class DanmakuWindow(QMainWindow):
         self._scroll_tracks = [0] * num_tracks
         self._top_tracks = [0] * num_tracks
         self._bottom_tracks = [0] * num_tracks
-
-        # ======================= 核心修正点 =======================
-        # 创建 DebugOverlay 时，将弹幕总数传递进去
         if self.config.debug:
             self.debug_overlay = DebugOverlay(self, self.config, total_danmaku_count)
         else:
             self.debug_overlay = None
-        # ========================================================
-        
         self._animation_timer = QTimer(self)
         self._animation_timer.timeout.connect(self.update_states)
         self._animation_timer.start(1000 // 60)
-
         self._on_top_timer = QTimer(self)
         self._on_top_timer.timeout.connect(self._force_on_top_win32_if_needed)
 
+    # ======================= 核心修正点 =======================
+    def _find_track(self, danmaku_data: DanmakuData, text_width: int) -> tuple[float, bool]:
+        """
+        轨道分配方法。
+        根据配置决定是允许重叠还是避免重叠。
+        """
+        # 如果配置允许重叠，则使用随机分配逻辑
+        if self.config.allow_overlap:
+            return self._find_track_with_overlap(danmaku_data)
+        # 否则，使用原有的、避免重叠的逻辑
+        else:
+            return self._find_track_without_overlap(danmaku_data, text_width)
+
+    def _find_track_with_overlap(self, danmaku_data: DanmakuData) -> tuple[float, bool]:
+        """允许重叠的轨道分配逻辑。"""
+        mode = danmaku_data.mode
+        num_tracks = self.config.max_tracks
+        if num_tracks <= 0: return 0, False
+
+        track_idx = random.randint(0, num_tracks - 1)
+        if mode == 1 or mode == 5:
+            y_pos = (track_idx * self.track_height) + self.y_offset
+            return y_pos, True
+        elif mode == 4:
+            y_pos = self.height() - ((track_idx + 1) * self.track_height)
+            return y_pos, True
+        return 0, False
+
+    def _find_track_without_overlap(self, danmaku_data: DanmakuData, text_width: int) -> tuple[float, bool]:
+        """避免重叠的原始轨道分配逻辑。"""
+        current_time = time.monotonic()
+        mode = danmaku_data.mode
+        
+        if mode == 1:
+            available_tracks = [i for i, t in enumerate(self._scroll_tracks) if current_time > t]
+            if not available_tracks: return 0, False
+            track_idx = random.choice(available_tracks)
+            y_pos = (track_idx * self.track_height) + self.y_offset
+            self._scroll_tracks[track_idx] = current_time + (text_width / self.config.scroll_speed) * 0.8
+            return y_pos, True
+        elif mode == 5:
+            for i, track_time in enumerate(self._top_tracks):
+                if current_time > track_time:
+                    y_pos = (i * self.track_height) + self.y_offset
+                    self._top_tracks[i] = current_time + (self.config.fixed_duration_ms / 1000)
+                    return y_pos, True
+            return 0, False
+        elif mode == 4:
+            for i, track_time in enumerate(self._bottom_tracks):
+                if current_time > track_time:
+                    y_pos = self.height() - ((i + 1) * self.track_height)
+                    self._bottom_tracks[i] = current_time + (self.config.fixed_duration_ms / 1000)
+                    return y_pos, True
+            return 0, False
+        return 0, False
+    # ========================================================
+
+    # (其余代码均无变化，此处省略)
     def set_stay_on_top(self, stay_on_top: bool):
         current_on_top_flag = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
         if current_on_top_flag == stay_on_top:
             return
-
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, stay_on_top)
-
         if stay_on_top and int(self.config.ontop_strategy) > 1:
             if not self._on_top_timer.isActive():
                 self._on_top_timer.start(2000)
@@ -102,7 +143,7 @@ class DanmakuWindow(QMainWindow):
                     win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0,0,0,0,
                                           win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
         except Exception as e:
-            logging.error(f"Win32置顶错误: {e}")
+            logging.error(f"Win32 on-top error: {e}")
             self._on_top_timer.stop()
 
     def add_danmaku(self, danmaku_data: DanmakuData):
@@ -136,17 +177,13 @@ class DanmakuWindow(QMainWindow):
         stroke_offset = self.config.stroke_width
         bounding_rect = self._font_metrics.boundingRect(danmaku.text)
         pixmap_size = QSize(bounding_rect.width() + stroke_offset * 2, bounding_rect.height() + stroke_offset * 2)
-
         pixmap = QPixmap(pixmap_size)
         pixmap.fill(Qt.GlobalColor.transparent)
-
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setFont(self._font)
-
         path = QPainterPath()
         path.addText(stroke_offset, self._font_metrics.ascent() + stroke_offset, self._font, danmaku.text)
-
         if self.config.stroke_width > 0:
             stroker = QPainterPathStroker()
             stroker.setWidth(self.config.stroke_width * 2)
@@ -155,27 +192,21 @@ class DanmakuWindow(QMainWindow):
             stroke_path = stroker.createStroke(path)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.fillPath(stroke_path, QColor("black"))
-
         painter.fillPath(path, danmaku.color)
         painter.end()
-
         danmaku.pixmap_cache = pixmap
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setOpacity(self.config.opacity)
-
         for danmaku in self._active_danmaku:
             if danmaku.pixmap_cache is None:
                 self._render_danmaku_to_pixmap(danmaku)
-
             if danmaku.pixmap_cache:
                 draw_pos = QPointF(danmaku.position.x() - self.config.stroke_width,
                                    danmaku.position.y() - self.config.stroke_width - self._font_metrics.ascent())
                 painter.drawPixmap(draw_pos, danmaku.pixmap_cache)
-
         painter.setOpacity(1.0)
-
         if self.debug_overlay:
             self.debug_overlay.paint(painter)
 
@@ -191,30 +222,3 @@ class DanmakuWindow(QMainWindow):
     def resume(self):
         if not self._animation_timer.isActive():
             self._animation_timer.start(1000 // 60)
-
-    def _find_track(self, danmaku_data, text_width):
-        current_time = time.monotonic()
-        mode = danmaku_data.mode
-        
-        if mode == 1:
-            available_tracks = [i for i, t in enumerate(self._scroll_tracks) if current_time > t]
-            if not available_tracks: return 0, False
-            track_idx = random.choice(available_tracks)
-            y_pos = (track_idx * self.track_height) + self.y_offset
-            self._scroll_tracks[track_idx] = current_time + (text_width / self.config.scroll_speed) * 0.8
-            return y_pos, True
-        elif mode == 5:
-            for i, track_time in enumerate(self._top_tracks):
-                if current_time > track_time:
-                    y_pos = (i * self.track_height) + self.y_offset
-                    self._top_tracks[i] = current_time + (self.config.fixed_duration_ms / 1000)
-                    return y_pos, True
-            return 0, False
-        elif mode == 4:
-            for i, track_time in enumerate(self._bottom_tracks):
-                if current_time > track_time:
-                    y_pos = self.height() - ((i + 1) * self.track_height)
-                    self._bottom_tracks[i] = current_time + (self.config.fixed_duration_ms / 1000)
-                    return y_pos, True
-            return 0, False
-        return 0, False

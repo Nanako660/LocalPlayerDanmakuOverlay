@@ -3,11 +3,6 @@ import logging
 import configparser
 
 class Config:
-    """
-    【已重构为单例模式】
-    负责加载、访问和保存应用程序的配置（config.ini）。
-    使用单例模式确保整个应用中共享同一个配置实例。
-    """
     _instance = None
 
     def __new__(cls, *args, **kwargs):
@@ -16,7 +11,6 @@ class Config:
         return cls._instance
 
     def __init__(self, filepath='config.ini'):
-        # 防止重复初始化
         if hasattr(self, '_initialized'):
             return
             
@@ -28,9 +22,11 @@ class Config:
                 'max_tracks': '18', 'opacity': '0.85', 'line_spacing_ratio': '0.2'
             },
             'Danmaku': {
-                'scroll_speed': '180', 'fixed_duration_ms': '5000', 'max_danmaku_count': '250'
+                'scroll_speed': '180', 'fixed_duration_ms': '5000', 
+                'max_danmaku_count': '250',
+                'allow_overlap': 'false' # 【新增】允许弹幕重叠
             },
-            'Sync': {'target_aumid': 'PotPlayerMini64'},
+            'Sync': {'target_aumid': 'PotPlayer64'},
             'Debug': {'enabled': 'false', 'info_position': 'bottom_left'},
             'OnTopStrategy': {'method': '1'},
             'Logging': {'level': 'INFO', 'log_to_file': 'true'},
@@ -55,26 +51,34 @@ class Config:
         self.save()
 
     def _load_values(self):
-        # (此方法无变化)
+        # Display
         self.font_name = self.parser.get('Display', 'font_name')
         self.font_size = self.parser.getint('Display', 'font_size')
         self.stroke_width = self.parser.getint('Display', 'stroke_width')
         self.max_tracks = self.parser.getint('Display', 'max_tracks')
         self.opacity = self.parser.getfloat('Display', 'opacity')
         self.line_spacing_ratio = self.parser.getfloat('Display', 'line_spacing_ratio')
+        # Danmaku
         self.scroll_speed = self.parser.getint('Danmaku', 'scroll_speed')
         self.fixed_duration_ms = self.parser.getint('Danmaku', 'fixed_duration_ms')
         self.max_danmaku_count = self.parser.getint('Danmaku', 'max_danmaku_count')
+        self.allow_overlap = self.parser.getboolean('Danmaku', 'allow_overlap') # 【新增】
+        # Sync
         self.target_aumid = self.parser.get('Sync', 'target_aumid')
         self.last_danmaku_path = self.parser.get('DEFAULT', 'LastDanmakuPath')
+        # Debug
         self.debug = self.parser.getboolean('Debug', 'enabled')
         self.debug_info_position = self.parser.get('Debug', 'info_position')
+        # OnTopStrategy
         self.ontop_strategy = self.parser.get('OnTopStrategy', 'method')
+        # Logging
         self.log_level = self.parser.get('Logging', 'level')
         self.log_to_file = self.parser.getboolean('Logging', 'log_to_file')
 
     def save(self):
-        # (此方法无变化)
+        # (大部分无变化)
+        self.parser.set('Danmaku', 'allow_overlap', str(self.allow_overlap).lower()) # 【新增】
+        # ... 其他 set ...
         self.parser.set('Display', 'font_name', self.font_name)
         self.parser.set('Display', 'font_size', str(self.font_size))
         self.parser.set('Display', 'stroke_width', str(self.stroke_width))
@@ -98,6 +102,5 @@ class Config:
         except Exception as e:
             logging.error(f"保存配置失败: {e}")
 
-# 全局访问点
 def get_config():
     return Config()

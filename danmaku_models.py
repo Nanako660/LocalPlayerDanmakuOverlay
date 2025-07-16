@@ -1,7 +1,7 @@
 # danmaku_models.py
 import time
 from PyQt6.QtCore import QPointF
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPixmap
 
 # 导入Config类仅用于类型注解，避免循环导入
 from typing import TYPE_CHECKING
