@@ -1,12 +1,16 @@
-# media_monitor.py
+# monitors/windows_monitor.py
 import asyncio
 from datetime import timedelta
-import win32gui
-import win32process
-from psutil import Process
+import logging
 
-# 尝试导入 winsdk
+# 导入抽象基类
+from .base_monitor import BaseMediaMonitor
+
+# 尝试导入Windows平台特定的库
 try:
+    import win32gui
+    import win32process
+    from psutil import Process
     from winsdk.windows.media.control import (
         GlobalSystemMediaTransportControlsSessionManager as MediaManager,
         GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus
@@ -14,6 +18,9 @@ try:
     WINSDK_AVAILABLE = True
 except ImportError:
     WINSDK_AVAILABLE = False
+    # 如果缺少库，在代码加载时就给出提示
+    logging.warning("缺少 Windows 平台所需的库 (winsdk, pywin32, psutil)。媒体监控功能将不可用。")
+
 
 class MediaMonitorError(Exception):
     """模块自定义的异常基类。"""
@@ -24,10 +31,10 @@ class SessionInfo:
     def __init__(self, title, artist, status, position, duration, aumid):
         self.title = title
         self.artist = artist
-        self.status = status.name # PlaybackStatus 枚举成员的名称
-        self.position = position
-        self.duration = duration
-        self.source_aumid = aumid
+        self.status = status.name # PlaybackStatus 枚举成员的名称, e.g., "PLAYING"
+        self.position = position # timedelta 对象
+        self.duration = duration # timedelta 对象
+        self.source_aumid = aumid # 来源应用的AUMID
 
     def __repr__(self):
         pos_str = self.format_time(self.position)
@@ -41,37 +48,15 @@ class SessionInfo:
         ts = int(duration.total_seconds())
         return f"{ts // 3600:02d}:{(ts % 3600) // 60:02d}:{ts % 60:02d}"
 
-def get_foreground_window_aumid() -> str | None:
+class WindowsMediaMonitor(BaseMediaMonitor):
     """
-    获取当前前台窗口的进程名，作为AUMID的代理。
-    注意：这只是一个近似方法，并非所有进程名都等于其AUMID。
-
-    Returns:
-        str | None: 进程名（如 "PotPlayerMini64.exe"），如果获取失败则返回None。
-    """
-    try:
-        hwnd = win32gui.GetForegroundWindow()
-        if hwnd:
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            return Process(pid).name()
-    except Exception:
-        return None
-    return None
-
-class MediaMonitor:
-    """
-    主监控类，使用Windows SMTC API来获取和筛选媒体会话信息。
+    Windows平台的媒体监控器实现。
+    使用Windows SMTC API来获取和筛选媒体会话信息。
     """
     def __init__(self):
         """
         初始化媒体监视器。
         如果 winsdk 不可用，将引发异常。
-
-        Example:
-            # try:
-            #     monitor = MediaMonitor()
-            # except MediaMonitorError as e:
-            #     print(e)
         """
         if not WINSDK_AVAILABLE:
             raise MediaMonitorError("winsdk 库未安装或不完整。请运行 'pip install winsdk'。")
@@ -79,16 +64,6 @@ class MediaMonitor:
     async def list_sessions(self) -> list[dict]:
         """
         异步列出所有当前活动的媒体会话的基本信息。
-        主要用于帮助用户发现目标播放器的 AUMID。
-
-        Returns:
-            list[dict]: 一个包含字典的列表，每个字典包含 'aumid' 和 'title'。
-        
-        Example:
-            # monitor = MediaMonitor()
-            # sessions = await monitor.list_sessions()
-            # for s in sessions:
-            #     print(f"AUMID: {s['aumid']}, Title: {s['title']}")
         """
         manager = await MediaManager.request_async()
         sessions = manager.get_sessions()
@@ -96,27 +71,20 @@ class MediaMonitor:
         for session in sessions:
             try:
                 info = await session.try_get_media_properties_async()
-                if info.title:
+                # 只有包含标题的会话才是有意义的媒体会话
+                if info and info.title:
                     session_list.append({
                         "aumid": session.source_app_user_model_id,
                         "title": info.title
                     })
             except Exception:
+                # 某些会话可能在查询时失效，直接跳过
                 continue
         return session_list
 
     async def get_current_session_info(self) -> SessionInfo | None:
         """
         异步获取当前SMTC托管的媒体会话的详细信息。
-
-        Returns:
-            SessionInfo | None: 一个 SessionInfo 对象，或在没有活动会话时返回 None。
-        
-        Example:
-            # monitor = MediaMonitor()
-            # info = await monitor.get_current_session_info()
-            # if info:
-            #     print(info.title, info.status, info.position)
         """
         try:
             manager = await MediaManager.request_async()
@@ -138,3 +106,19 @@ class MediaMonitor:
             position=timeline.position, duration=timeline.end_time,
             aumid=session.source_app_user_model_id
         )
+
+    def get_foreground_window_aumid(self) -> str | None:
+        """
+        获取当前前台窗口的进程名，作为AUMID的代理。
+        注意：这只是一个近似方法，并非所有进程名都等于其AUMID，但对于PotPlayer等应用有效。
+        """
+        if not WINSDK_AVAILABLE:
+            return None
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            if hwnd:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                return Process(pid).name()
+        except Exception:
+            return None
+        return None
