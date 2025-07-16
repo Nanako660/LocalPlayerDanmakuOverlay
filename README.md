@@ -35,12 +35,12 @@
 #### 控制面板
 集成了主控制、详细设置和日志查看三大功能模块，界面清晰，操作便捷。
 
-![控制面板截图]([https://raw.githubusercontent.com/Nanako660/LocalPlayerDanmakuOverlay/main/img/1.png])
+![控制面板截图](https://raw.githubusercontent.com/Nanako660/LocalPlayerDanmakuOverlay/main/img/1.png)
 
 #### 弹幕与调试信息效果
 弹幕清晰地悬浮在播放器之上。开启调试模式后，角落会显示一个带半透明背景的调试信息面板。
 
-![弹幕与调试信息截图]([https://raw.githubusercontent.com/Nanako660/LocalPlayerDanmakuOverlay/main/img/2.png])
+![弹幕与调试信息截图](https://raw.githubusercontent.com/Nanako660/LocalPlayerDanmakuOverlay/main/img/2.png)
 
 ## 🚀 安装与运行
 
